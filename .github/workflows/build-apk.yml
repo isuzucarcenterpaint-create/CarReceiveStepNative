@@ -1,0 +1,67 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+    paths: ['*.zip']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Unzip project
+        run: |
+          ZIP=$(ls *.zip | sort -V | tail -1)
+          echo "Using $ZIP"
+          mkdir -p proj
+          unzip -q -o "$ZIP" -d proj
+          P=$(find proj -maxdepth 2 -name package.json | head -1)
+          echo "PROJ=$(dirname "$P")" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJ }}
+        run: npm install --no-audit --no-fund
+
+      - name: Build web assets (offline CSS and icons)
+        working-directory: ${{ env.PROJ }}
+        run: |
+          npx tailwindcss -c tailwind.config.js -i tailwind.input.css -o www/tailwind.css --minify
+          L=$(find node_modules/lucide -name lucide.min.js | head -1)
+          cp "$L" www/lucide.min.js
+
+      - name: Create Android project
+        working-directory: ${{ env.PROJ }}
+        run: |
+          npx cap add android
+          python3 scripts/patch_android.py
+          npx cap sync android
+
+      - name: Build signed APK
+        working-directory: ${{ env.PROJ }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Show SHA-1
+        working-directory: ${{ env.PROJ }}
+        run: |
+          echo "### SHA-1 for Google Cloud" >> "$GITHUB_STEP_SUMMARY"
+          keytool -list -v -keystore release.p12 -storetype PKCS12 -storepass inspect123 | grep -E "SHA1" >> "$GITHUB_STEP_SUMMARY"
+          echo "Package name: com.inspect.vehicleform" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VehicleInspection-APK
+          path: ${{ env.PROJ }}/android/app/build/outputs/apk/release/app-release.apk
